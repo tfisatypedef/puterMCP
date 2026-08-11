@@ -25,7 +25,7 @@ try {
     name: 'generate_image',
     arguments: {
       prompt: 'A futuristic cyberpunk city with neon lights and flying cars, high detail, 8k resolution',
-      model: 'black-forest-labs/FLUX.1-schnell',
+      model: 'gpt-image-1-mini',
     },
   });
   console.log(JSON.stringify(result, null, 2));

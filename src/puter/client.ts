@@ -1,8 +1,7 @@
 import { AuthManager } from './auth.js';
 import { PuterApiError, PuterAuthError } from './types.js';
 import { logger } from '../utils/logger.js';
-
-const PUTER_API_BASE = 'https://api.puter.com';
+import { PUTER_API_BASE } from '../constants.js';
 
 export interface DriverCallParams {
   interface: string;
@@ -18,6 +17,28 @@ export interface DriverCallResult {
   error?: { code: string; message: string };
 }
 
+/**
+ * Normalized image-generation result.
+ * - `base64`/`mimeType` are set when the provider returned a data-URI (inline).
+ * - `url` is set when the provider returned a hosted share URL (link only).
+ * - `dataUrl` mirrors `base64`/`mimeType` as a full data-URI.
+ */
+export interface ImageResult {
+  base64?: string;
+  mimeType?: string;
+  dataUrl?: string;
+  url?: string;
+}
+
+export interface ImageModelInfo {
+  id: string;
+  provider?: string;
+  name?: string;
+  quality?: string[];
+}
+
+const DATA_URI_PATTERN = /^data:image\/([a-zA-Z0-9.+-]+);base64,([\s\S]+)$/;
+
 export class PuterClient {
   private authManager: AuthManager;
 
@@ -32,11 +53,15 @@ export class PuterClient {
    * Auth: Bearer token in Authorization header
    * Content-Type: application/json
    *
-   * The API uses an "interface/service/method/args" pattern where:
+   * The API uses an "interface/driver/method/args" pattern where:
    * - interface: the driver type (e.g., "puter-image-generation")
-   * - service/driver: the specific provider (e.g., "openai-image-generation")
+   * - driver: the driver name (e.g., "ai-image")
    * - method: the operation (e.g., "generate")
    * - args: operation-specific parameters
+   *
+   * Note: the response `result` for image generation is a string — either a
+   * data-URI (`data:image/jpeg;base64,...`) or a hosted URL — which is
+   * normalized into an `ImageResult` below.
    */
   async callDriver(params: DriverCallParams): Promise<DriverCallResult> {
     const token = await this.authManager.getToken();
@@ -70,12 +95,19 @@ export class PuterClient {
       body: JSON.stringify(body),
     });
 
-    // Non-200 means transport-level error
+    // Non-200 means transport-level error — surface the API's error message
     if (!response.ok) {
-      throw new PuterApiError(
-        `HTTP ${response.status}: ${response.statusText}`,
-        response.status
-      );
+      let message = `HTTP ${response.status}: ${response.statusText}`;
+      try {
+        const text = await response.text();
+        const data = JSON.parse(text) as { error?: string; message?: string; code?: string };
+        const detail = data.error || data.message;
+        if (detail) message = `${detail} (HTTP ${response.status})`;
+        throw new PuterApiError(message, response.status, data.code);
+      } catch (e) {
+        if (e instanceof PuterApiError) throw e;
+        throw new PuterApiError(message, response.status);
+      }
     }
 
     const contentType = response.headers.get('content-type') || '';
@@ -91,7 +123,7 @@ export class PuterClient {
           data.error?.code
         );
       }
-      return data as DriverCallResult;
+      return this.normalizeResult(data as DriverCallResult);
     }
 
     // Otherwise, treat as binary/image
@@ -131,8 +163,76 @@ export class PuterClient {
   }
 
   /**
+   * Normalize the driver response so `result` is always an `ImageResult`
+   * object, regardless of whether Puter returned a data-URI string, a hosted
+   * URL string, or (legacy) an object/raw bytes.
+   */
+  private normalizeResult(data: DriverCallResult): DriverCallResult {
+    const result = data.result;
+
+    if (typeof result === 'string') {
+      const dataUri = result.match(DATA_URI_PATTERN);
+      if (dataUri) {
+        return {
+          success: true,
+          result: {
+            base64: dataUri[2],
+            mimeType: `image/${dataUri[1]}`,
+            dataUrl: result,
+          } as ImageResult,
+        };
+      }
+      if (result.startsWith('http://') || result.startsWith('https://')) {
+        return {
+          success: true,
+          result: { url: result } as ImageResult,
+        };
+      }
+    }
+
+    // Object-shaped result (legacy) — pass through as-is.
+    return data;
+  }
+
+  /**
+   * Fetch the live image-generation model catalog from Puter's public,
+   * no-auth listing endpoint (mirrors puter-js `listModels`).
+   */
+  async listModels(): Promise<ImageModelInfo[]> {
+    const token = await this.authManager.getToken();
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const response = await fetch(`${PUTER_API_BASE}/puterai/image/models/details`, { headers });
+
+    if (!response.ok) {
+      throw new PuterApiError(
+        `HTTP ${response.status}: ${response.statusText}`,
+        response.status
+      );
+    }
+
+    const data = await response.json() as { models?: Array<Record<string, unknown>> };
+    if (!Array.isArray(data.models)) return [];
+
+    return data.models
+      .filter((m) => typeof m.id === 'string')
+      .map((m) => ({
+        id: m.id as string,
+        provider: typeof m.provider === 'string' ? m.provider : undefined,
+        name: typeof m.name === 'string' ? m.name : undefined,
+        quality: Array.isArray(m.allowedQualityLevels)
+          ? (m.allowedQualityLevels as string[]).filter((q) => typeof q === 'string')
+          : undefined,
+      }))
+      .sort((a, b) => a.id.localeCompare(b.id));
+  }
+
+  /**
    * Generate an image from a text prompt.
-   * Returns the raw base64 image data and MIME type.
+   * Returns a normalized `ImageResult` (inline base64 or hosted URL).
    */
   async generateImage(
     prompt: string,
@@ -143,11 +243,11 @@ export class PuterClient {
       inputImage?: string;       // base64 for img2img
       inputImageMimeType?: string;
     } = {}
-  ): Promise<{ base64: string; mimeType: string; dataUrl: string }> {
+  ): Promise<ImageResult> {
     // Build the args object
     const args: Record<string, unknown> = {
       prompt,
-      model: options.model || 'dall-e-3'
+      model: options.model || 'gpt-image-1-mini'
     };
 
     if (options.quality) args.quality = options.quality;
@@ -157,60 +257,17 @@ export class PuterClient {
       args.input_image_mime_type = options.inputImageMimeType || 'image/png';
     }
 
-    // Determine the driver/service from the model name
-    const model = options.model || 'dall-e-3';
-    const driverInfo = resolveModelToDriver(model);
-
     const result = await this.callDriver({
-      interface: driverInfo.interface,
-      driver: driverInfo.driver,
+      interface: 'puter-image-generation',
+      driver: 'ai-image',
       method: 'generate',
-      args: {
-        ...args,
-        ...(driverInfo.extraArgs || {}),
-      },
+      args,
     });
 
     if (!result.success || !result.result) {
       throw new PuterApiError('Image generation failed: no result returned');
     }
 
-    return result.result as { base64: string; mimeType: string; dataUrl: string };
+    return result.result as ImageResult;
   }
-}
-
-/**
- * Map a user-friendly model name to the Puter driver interface/service.
- *
- * Puter's image gen uses the "puter-image-generation" interface.
- * The specific model/provider is determined by the "driver" field.
- *
- * This mapping may need updating as Puter adds models.
- * The txt2img function in Puter.js internally maps model names to services.
- */
-interface DriverMapping {
-  interface: string;
-  driver: string;
-  extraArgs?: Record<string, unknown>;
-}
-
-function resolveModelToDriver(model: string): DriverMapping {
-  const base: DriverMapping = {
-    interface: 'puter-image-generation',
-    driver: 'openai-image-generation', // Default fallback
-  };
-
-  // OpenAI Models
-  if (model.startsWith('dall-e') || model.startsWith('gpt-image')) {
-    return { ...base, driver: 'openai-image-generation' };
-  }
-
-  // Google / Gemini Models
-  if (model.startsWith('gemini-') || model.startsWith('google/')) {
-    return { ...base, driver: 'gemini-image-generation' };
-  }
-
-  // Everything else (Flux, Stable Diffusion, Ideogram, etc.) is likely on Together AI
-  // This covers: black-forest-labs, stabilityai, ideogram, etc.
-  return { ...base, driver: 'together-image-generation' };
 }

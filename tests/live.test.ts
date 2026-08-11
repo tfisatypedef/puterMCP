@@ -18,15 +18,15 @@ runIfToken('Live Integration Tests', () => {
 
   const client = new PuterClient(authManager);
 
-  it('should generate an image using OpenAI (DALL-E 3)', async () => {
+  it('should generate an image using OpenAI (GPT Image)', async () => {
     const result = await client.generateImage('A minimal red square', {
-      model: 'dall-e-3',
-      quality: 'standard'
+      model: 'gpt-image-1-mini',
+      quality: 'low'
     });
 
     expect(result.mimeType).toMatch(/^image\//);
     expect(result.base64).toBeDefined();
-    expect(result.base64.length).toBeGreaterThan(100);
+    expect(result.base64!.length).toBeGreaterThan(100);
   }, 60000); // 60s timeout
 
   it('should generate an image using Google (Gemini Nano)', async () => {
@@ -43,7 +43,9 @@ runIfToken('Live Integration Tests', () => {
       model: 'black-forest-labs/FLUX.1-schnell'
     });
 
-    expect(result.mimeType).toMatch(/^image\//);
-    expect(result.base64).toBeDefined();
+    expect(result.base64 || result.url).toBeDefined();
+    if (result.base64) {
+      expect(result.mimeType).toMatch(/^image\//);
+    }
   }, 60000);
 });

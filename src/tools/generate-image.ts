@@ -85,21 +85,41 @@ rendering in MCP clients. No API keys required — uses your Puter account.`,
               quality: args.quality,
             });
 
-            return {
-              content: [
-                {
-                  type: 'image',
-                  data: result.base64,
-                  mimeType: result.mimeType,
-                },
-                {
-                  type: 'text',
-                  text: `✅ **Image generated successfully**\n` +
-                    `- **Model:** ${model}\n` +
-                    `- **Prompt:** "${args.prompt}"`,
-                },
-              ],
-            };
+            // Inline image when the provider returned base64 data.
+            if (result.base64) {
+              return {
+                content: [
+                  {
+                    type: 'image',
+                    data: result.base64,
+                    mimeType: result.mimeType || 'image/png',
+                  },
+                  {
+                    type: 'text',
+                    text: `✅ **Image generated successfully**\n` +
+                      `- **Model:** ${model}\n` +
+                      `- **Prompt:** "${args.prompt}"`,
+                  },
+                ],
+              };
+            }
+
+            // Otherwise the provider returned a hosted URL — return it as a link.
+            if (result.url) {
+              return {
+                content: [
+                  {
+                    type: 'text',
+                    text: `✅ **Image generated successfully**\n` +
+                      `- **Model:** ${model}\n` +
+                      `- **Prompt:** "${args.prompt}"\n` +
+                      `- **Image:** ${result.url}`,
+                  },
+                ],
+              };
+            }
+
+            throw new Error('Image generation returned no usable result');
           } catch (error) {
             lastError = error;
             if (shouldFallback(error) && model !== chain[chain.length - 1]) {
