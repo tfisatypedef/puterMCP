@@ -1,8 +1,7 @@
 {
   "name": "puter-mcp",
   "version": "0.1.1",
-  "description": "MCP server bridging LLM environments with Puter's free AI APIs - DEPRECATED",
-  "deprecated": true,
+  "description": "MCP server + OpenAI-compatible bridge for Puter's free AI APIs (image generation & LLM chat)",
   "type": "module",
   "bin": {
     "puter-mcp": "bin/puter-mcp.mjs"
@@ -24,9 +23,13 @@
     "mcp",
     "puter",
     "image-generation",
+    "llm",
+    "chat",
+    "openai-compatible",
     "ai",
     "claude",
-    "cursor"
+    "cursor",
+    "opencode"
   ],
   "engines": {
     "node": ">=18.0.0"
