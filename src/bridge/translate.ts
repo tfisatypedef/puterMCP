@@ -126,7 +126,12 @@ export const translateResponse = (
       },
     ],
     ...(result.usage && Object.keys(result.usage).length > 0
-      ? { usage: { prompt_tokens: result.usage.input_tokens, completion_tokens: result.usage.output_tokens } }
+      ? {
+          usage: {
+            prompt_tokens: result.usage.prompt_tokens,
+            completion_tokens: result.usage.completion_tokens,
+          },
+        }
       : {}),
   };
 };
@@ -213,10 +218,14 @@ export const translateStreamChunk = (
       };
       return [JSON.stringify(payload)];
     }
-    case 'done': {
+    case 'done':
+    case 'usage': {
+      // Puter ends streams with a `usage` chunk (some providers still send
+      // `done`); both must emit the final OpenAI `finish_reason` delta.
+      const finish = state.toolCallIndex > 0 ? FINISH_TOOL : FINISH_STOP;
       const payload = {
         ...base,
-        choices: [{ index: 0, delta: {}, finish_reason: FINISH_STOP }],
+        choices: [{ index: 0, delta: {}, finish_reason: finish }],
       };
       return [JSON.stringify(payload)];
     }

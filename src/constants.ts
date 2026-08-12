@@ -65,6 +65,25 @@ export const SUPPORTED_MODELS: ModelInfo[] = [
 
 export const DEFAULT_MODEL = 'gpt-image-1-mini';
 export const PUTER_API_BASE = 'https://api.puter.com';
+
+/**
+ * Chat models that cost $0 (verified live: `costs.prompt_tokens` and
+ * `costs.completion_tokens` are both 0 in `/puterai/chat/models/details`).
+ * These work even when the account's monthly allowance is exhausted, because
+ * Puter's credit gate (`hasEnoughCredits(actor, 0)`) always passes for $0.
+ */
+export const FREE_CHAT_MODELS = [
+  'glm-4.7-flash',
+  'glm-4.5-flash',
+  'glm-4.6v-flash',
+  'autoglm-phone-multilingual',
+];
+
+/**
+ * Default free model used when a paid chat call fails with `insufficient_funds`
+ * (402), so chat keeps working once the account's free monthly allowance runs out.
+ */
+export const CHAT_FALLBACK_MODEL = 'glm-4.7-flash';
 export const MODEL_FALLBACK_CHAIN = [
   'gpt-image-1-mini',
   'gpt-image-2',

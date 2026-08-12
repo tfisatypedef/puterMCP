@@ -207,4 +207,126 @@ describe('PuterClient', () => {
     expect(models[0]).toMatchObject({ id: 'gemini-3-pro-image-preview', quality: undefined });
     expect(models[1]).toMatchObject({ id: 'gpt-image-1-mini', quality: ['low', 'high'] });
   });
+
+  it('should mark free chat models from the live cost field', async () => {
+    (authManager.getToken as any).mockResolvedValue('valid-token');
+    fetchMock.mockResolvedValue({
+      ok: true,
+      headers: { get: () => 'application/json' },
+      json: async () => ({
+        models: [
+          { id: 'gpt-5-nano', costs: { prompt_tokens: 5, completion_tokens: 40 } },
+          { id: 'glm-4.7-flash', costs: { prompt_tokens: 0, completion_tokens: 0 } },
+        ],
+      }),
+    });
+    const models = await client.listChatModels();
+    expect(models).toEqual([
+      { id: 'glm-4.7-flash', provider: undefined, name: undefined, free: true },
+      { id: 'gpt-5-nano', provider: undefined, name: undefined, free: false },
+    ]);
+  });
+
+  it('should retry with the free fallback model on 402 insufficient_funds', async () => {
+    (authManager.getToken as any).mockResolvedValue('valid-token');
+    const requested: string[] = [];
+    fetchMock.mockImplementation((_url: string, init: any) => {
+      const body = JSON.parse(init.body);
+      const model: string = body.args?.model ?? '';
+      requested.push(model);
+      if (model === 'gpt-5-nano') {
+        return Promise.resolve({
+          ok: false,
+          status: 402,
+          statusText: 'Payment Required',
+          headers: { get: () => 'application/json' },
+          text: async () =>
+            JSON.stringify({ error: 'No usage left for request.', code: 'insufficient_funds' }),
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        headers: { get: () => 'application/json' },
+        json: async () => ({
+          success: true,
+          result: {
+            message: { role: 'assistant', content: 'free reply' },
+            usage: { prompt_tokens: 2, completion_tokens: 3 },
+          },
+        }),
+      });
+    });
+
+    const result = await client.chatWithFreeFallback(
+      [{ role: 'user', content: 'hi' }],
+      { model: 'gpt-5-nano' }
+    );
+
+    expect(requested).toEqual(['gpt-5-nano', 'glm-4.7-flash']);
+    expect(result.model).toBe('glm-4.7-flash');
+    expect(result.message.content).toBe('free reply');
+  });
+
+  it('should NOT retry when the failure is not about credits', async () => {
+    (authManager.getToken as any).mockResolvedValue('valid-token');
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 500,
+      statusText: 'Internal Server Error',
+      headers: { get: () => 'application/json' },
+      text: async () => JSON.stringify({ error: 'boom' }),
+    });
+
+    await expect(
+      client.chatWithFreeFallback([{ role: 'user', content: 'hi' }], { model: 'gpt-5-nano' })
+    ).rejects.toThrow();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('should NOT retry when the requested model is already the fallback', async () => {
+    (authManager.getToken as any).mockResolvedValue('valid-token');
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 402,
+      statusText: 'Payment Required',
+      headers: { get: () => 'application/json' },
+      text: async () => JSON.stringify({ error: 'No usage left for request.', code: 'insufficient_funds' }),
+    });
+
+    await expect(
+      client.chatWithFreeFallback([{ role: 'user', content: 'hi' }], { model: 'glm-4.7-flash' })
+    ).rejects.toThrow();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('should capture usage from the streaming `usage` chunk', async () => {
+    (authManager.getToken as any).mockResolvedValue('valid-token');
+    const lines = [
+      '{"type":"text","text":"hi"}',
+      '{"type":"usage","usage":{"prompt_tokens":1,"completion_tokens":2}}',
+    ];
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(lines.join('\n') + '\n'));
+        controller.close();
+      },
+    });
+    fetchMock.mockResolvedValue({
+      ok: true,
+      headers: { get: () => 'application/x-ndjson' },
+      body: stream,
+    });
+
+    const chunks: any[] = [];
+    const result = await client.chat(
+      [{ role: 'user', content: 'hi' }],
+      { stream: true, onChunk: (chunk) => chunks.push(chunk) }
+    );
+
+    expect(chunks[chunks.length - 1]).toEqual({
+      type: 'usage',
+      usage: { prompt_tokens: 1, completion_tokens: 2 },
+    });
+    expect(result.usage).toEqual({ prompt_tokens: 1, completion_tokens: 2 });
+  });
 });

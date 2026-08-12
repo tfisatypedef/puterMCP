@@ -70,9 +70,12 @@ export function createBridgeServer(options: BridgeOptions = {}): http.Server {
   const handleModels = async (res: http.ServerResponse): Promise<void> => {
     try {
       const models = await client.listChatModels();
+      const sorted = [...models].sort(
+        (a, b) => (Number(b.free) - Number(a.free)) || a.id.localeCompare(b.id)
+      );
       sendJson(res, 200, {
         object: 'list',
-        data: models.map((m) => ({
+        data: sorted.map((m) => ({
           id: m.id,
           object: 'model',
           created: 0,
@@ -136,14 +139,13 @@ export function createBridgeServer(options: BridgeOptions = {}): http.Server {
       };
 
       try {
-        await client.chat(messages as ChatMessage[], {
+        await client.chatWithFreeFallback(messages as ChatMessage[], {
           ...options,
           stream: true,
           testMode,
           onChunk: (chunk) => {
             if (chunk.type === 'error') {
               errored = true;
-              sendSse(JSON.stringify(translateError(500, chunk.message, 'stream_error')));
               return;
             }
             for (const line of translateStreamChunk(chunk, state)) {
@@ -155,7 +157,15 @@ export function createBridgeServer(options: BridgeOptions = {}): http.Server {
         res.end();
       } catch (err) {
         if (!res.writableEnded) {
-          sendSse(JSON.stringify(translateError(500, err instanceof Error ? err.message : String(err), 'stream_error')));
+          const status =
+            err instanceof PuterApiError && err.statusCode
+              ? err.statusCode
+              : 500;
+          sendSse(
+            JSON.stringify(
+              translateError(status, err instanceof Error ? err.message : String(err), 'stream_error')
+            )
+          );
           res.end();
         }
       }
@@ -163,11 +173,11 @@ export function createBridgeServer(options: BridgeOptions = {}): http.Server {
     }
 
     try {
-      const result = await client.chat(messages as ChatMessage[], {
+      const result = await client.chatWithFreeFallback(messages as ChatMessage[], {
         ...options,
         testMode,
       });
-      sendJson(res, 200, translateResponse(result, model));
+      sendJson(res, 200, translateResponse(result, result.model || model));
     } catch (err) {
       sendError(res, err);
     }

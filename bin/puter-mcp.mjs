@@ -81,7 +81,7 @@ if (args.includes('--bridge')) {
   }
 
   const server = createBridgeServer();
-  server.listen(port, () => {
+  server.listen(port, '127.0.0.1', () => {
     console.error(`[puterMCP] OpenAI-compatible bridge listening on http://127.0.0.1:${port}`);
     console.error(`[puterMCP]   GET  /v1/models`);
     console.error(`[puterMCP]   POST /v1/chat/completions`);

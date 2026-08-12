@@ -1,7 +1,7 @@
 import { AuthManager } from './auth.js';
 import { PuterApiError, PuterAuthError } from './types.js';
 import { logger } from '../utils/logger.js';
-import { PUTER_API_BASE } from '../constants.js';
+import { CHAT_FALLBACK_MODEL, PUTER_API_BASE } from '../constants.js';
 
 export interface DriverCallParams {
   interface: string;
@@ -75,6 +75,7 @@ export type ChatStreamChunk =
   | { type: 'text'; text: string }
   | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
   | { type: 'done'; usage?: Record<string, number> }
+  | { type: 'usage'; usage?: Record<string, number> }
   | { type: 'error'; message: string };
 
 export interface ChatOptions {
@@ -101,16 +102,60 @@ export interface ChatResult {
     tool_calls?: PuterToolCall[];
   };
   usage?: Record<string, number>;
+  /** Model id actually used. Set when a free-model fallback retry occurred. */
+  model?: string;
 }
 
 export interface ChatModelInfo {
   id: string;
   provider?: string;
   name?: string;
+  /** True when the model costs $0 (verified via the live `costs` field). */
+  free?: boolean;
 }
 
 const DATA_URI_PATTERN = /^data:image\/([a-zA-Z0-9.+-]+);base64,([\s\S]+)$/;
 const CHAT_COMPLETION_INTERFACE = 'puter-chat-completion';
+
+/** A chat model is free when both input and output token costs are $0. */
+const isFreeChatModel = (costs: Record<string, unknown> | undefined): boolean => {
+  if (!costs) return false;
+  return (
+    Number(costs.prompt_tokens) === 0 &&
+    Number(costs.completion_tokens) === 0
+  );
+};
+
+/** Normalize a Puter error body (`error` may be a string or an object). */
+const extractErrorDetail = (
+  data: { error?: unknown; message?: unknown; code?: unknown }
+): { message?: string; code?: string } => {
+  const err = data.error;
+  const message =
+    typeof data.message === 'string' ? data.message :
+    typeof err === 'string' ? err :
+    err && typeof err === 'object' && typeof (err as { message?: unknown }).message === 'string'
+      ? (err as { message: string }).message
+      : undefined;
+  const code =
+    typeof data.code === 'string' ? data.code :
+    err && typeof err === 'object' && typeof (err as { code?: unknown }).code === 'string'
+      ? (err as { code: string }).code
+      : undefined;
+  return { message, code };
+};
+
+/** True when a Puter error means the account is out of credits/allowance. */
+const isInsufficientFunds = (err: unknown): boolean => {
+  if (!(err instanceof PuterApiError)) return false;
+  if (err.statusCode === 402) return true;
+  const code = err.code || '';
+  const msg = err.message || '';
+  return (
+    /insufficient_funds|insufficient_credits|insufficient|billing|payment|quota|no usage left/i.test(msg) ||
+    /insufficient_funds|insufficient_credits/i.test(code)
+  );
+};
 
 export class PuterClient {
   private authManager: AuthManager;
@@ -174,10 +219,10 @@ export class PuterClient {
       let message = `HTTP ${response.status}: ${response.statusText}`;
       try {
         const text = await response.text();
-        const data = JSON.parse(text) as { error?: string; message?: string; code?: string };
-        const detail = data.error || data.message;
-        if (detail) message = `${detail} (HTTP ${response.status})`;
-        throw new PuterApiError(message, response.status, data.code);
+        const data = JSON.parse(text) as { error?: unknown; message?: unknown; code?: unknown };
+        const detail = extractErrorDetail(data);
+        if (detail.message) message = `${detail.message} (HTTP ${response.status})`;
+        throw new PuterApiError(message, response.status, detail.code);
       } catch (e) {
         if (e instanceof PuterApiError) throw e;
         throw new PuterApiError(message, response.status);
@@ -341,6 +386,7 @@ export class PuterClient {
         id: m.id as string,
         provider: typeof m.provider === 'string' ? m.provider : undefined,
         name: typeof m.name === 'string' ? m.name : undefined,
+        free: isFreeChatModel(m.costs as Record<string, unknown> | undefined),
       }))
       .sort((a, b) => a.id.localeCompare(b.id));
   }
@@ -433,6 +479,37 @@ export class PuterClient {
   }
 
   /**
+   * Run a chat completion, retrying once with a free ($0) model when the
+   * account's credit/allowance gate rejects the requested (paid) model.
+   * Works for stream and non-stream: the 402 gate fires before any stream
+   * body is produced, so a retry can only duplicate transport work, never
+   * output.
+   */
+  async chatWithFreeFallback(
+    messages: ChatMessage[],
+    options: ChatOptions = {}
+  ): Promise<ChatResult> {
+    try {
+      return await this.chat(messages, options);
+    } catch (err) {
+      if (
+        isInsufficientFunds(err) &&
+        options.model !== CHAT_FALLBACK_MODEL
+      ) {
+        logger.warn(
+          `Chat blocked (${err instanceof Error ? err.message : err}); retrying with free model '${CHAT_FALLBACK_MODEL}'`
+        );
+        const result = await this.chat(messages, {
+          ...options,
+          model: CHAT_FALLBACK_MODEL,
+        });
+        return { ...result, model: CHAT_FALLBACK_MODEL };
+      }
+      throw err;
+    }
+  }
+
+  /**
    * Stream a chat completion. The `/drivers/call` endpoint responds with
    * `application/x-ndjson` (one JSON object per line) when `args.stream`
    * is true. Chunk types: `text`, `tool_use`, `done`, `error`.
@@ -456,10 +533,10 @@ export class PuterClient {
       let message = `HTTP ${response.status}: ${response.statusText}`;
       try {
         const text = await response.text();
-        const data = JSON.parse(text) as { error?: string; message?: string; code?: string };
-        const detail = data.error || data.message;
-        if (detail) message = `${detail} (HTTP ${response.status})`;
-        throw new PuterApiError(message, response.status, data.code);
+        const data = JSON.parse(text) as { error?: unknown; message?: unknown; code?: unknown };
+        const detail = extractErrorDetail(data);
+        if (detail.message) message = `${detail.message} (HTTP ${response.status})`;
+        throw new PuterApiError(message, response.status, detail.code);
       } catch (e) {
         if (e instanceof PuterApiError) throw e;
         throw new PuterApiError(message, response.status);
@@ -495,6 +572,9 @@ export class PuterClient {
           });
           break;
         case 'done':
+          usage = chunk.usage;
+          break;
+        case 'usage':
           usage = chunk.usage;
           break;
         case 'error':

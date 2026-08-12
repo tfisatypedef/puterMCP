@@ -5,7 +5,7 @@ import { AuthManager } from '../puter/auth.js';
 import { PuterClient } from '../puter/client.js';
 import { logger } from '../utils/logger.js';
 
-const CHAT_MODEL_RE = /^[a-zA-Z0-9_.:-]+\/[a-zA-Z0-9_.:-]+$/;
+const CHAT_MODEL_RE = /^[a-zA-Z0-9_.:-]+(?:\/[a-zA-Z0-9_.:-]+)?$/;
 
 const toolCallsToString = (
   toolCalls?: ChatMessage['tool_calls']
@@ -44,7 +44,7 @@ Returns the assistant's text response alongside the model that was used.`,
         .describe('Conversation history (oldest first).'),
       model: z
         .string()
-        .regex(CHAT_MODEL_RE, 'Expected a Puter model id, e.g. openai/gpt-4o-mini')
+        .regex(CHAT_MODEL_RE, 'Expected a Puter model id, e.g. gpt-5-nano or openai/gpt-4o-mini')
         .optional()
         .describe('Puter model id (defaults to Puter\'s server default).'),
       temperature: z
@@ -63,12 +63,12 @@ Returns the assistant's text response alongside the model that was used.`,
         .boolean()
         .optional()
         .default(false)
-        .describe('Use Puter\'s free test API (no credits consumed).'),
+        .describe('Use Puter\'s test API. Note: testMode does NOT bypass Puter\'s credit gate — a 0-credit account still gets a 402.'),
     },
     async (args) => {
       try {
         const messages: ChatMessage[] = args.messages;
-        const result = await client.chat(messages, {
+        const result = await client.chatWithFreeFallback(messages, {
           model: args.model,
           temperature: args.temperature,
           maxTokens: args.maxTokens,
@@ -78,16 +78,19 @@ Returns the assistant's text response alongside the model that was used.`,
         let text = result.message.content || '';
         text += toolCallsToString(result.message.tool_calls);
 
+        const modelUsed = result.model || args.model || 'puter-chat (default)';
+        const usageNote = result.usage
+          ? `\n\n_Usage: input ${result.usage.prompt_tokens ?? '?'} tokens, output ${result.usage.completion_tokens ?? '?'} tokens._`
+          : '';
+
         return {
           content: [
             {
               type: 'text',
               text:
-                `**Model:** ${args.model || 'puter-chat (default)'}\n\n` +
+                `**Model:** ${modelUsed}${result.model ? ' (free fallback)' : ''}\n\n` +
                 text +
-                (result.usage
-                  ? `\n\n_Usage: input ${result.usage.input_tokens ?? '?'} tokens, output ${result.usage.output_tokens ?? '?'} tokens._`
-                  : ''),
+                usageNote,
             },
           ],
         };
@@ -129,10 +132,13 @@ export function registerListChatModelsTool(server: McpServer): void {
         if (args.provider) {
           models = models.filter((m) => m.provider === args.provider);
         }
+        models = [...models].sort(
+          (a, b) => (Number(b.free) - Number(a.free)) || a.id.localeCompare(b.id)
+        );
 
         const formatted = models
           .map((m) => {
-            let line = `- **${m.id}**`;
+            let line = `- **${m.id}**${m.free ? ' (free)' : ''}`;
             if (m.provider) line += ` (${m.provider}${m.name ? ` — ${m.name}` : ''})`;
             else if (m.name) line += ` — ${m.name}`;
             return line;

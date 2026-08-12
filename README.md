@@ -19,7 +19,9 @@ All without API keys or per-request costs (Puter bills usage against your accoun
 - **Universal Compatibility**: Works with Claude Desktop, Cursor, Trae, opencode, and any other MCP client.
 - **Inline Image Generation**: Images are returned directly in the chat interface, ready for preview and download.
 - **Smart Fallback**: Automatically tries free models (like Flux) if premium models (like DALL-E 3) fail due to quota limits.
-- **testMode**: Use Puter's free test API for chat to avoid spending credits.
+- **Free Chat Fallback**: If a paid chat model hits Puter's credit gate (`402 insufficient_funds`), chat automatically retries on a genuinely free model (`glm-4.7-flash`).
+- **Free Models**: Chat models that cost $0 (`glm-4.7-flash`, `glm-4.5-flash`, `glm-4.6v-flash`, `autoglm-phone-multilingual`) work even when your monthly allowance is exhausted; they are listed first in `list_chat_models` and `/v1/models`.
+- **testMode**: Uses Puter's test API (skips moderation). Note: it does **not** bypass Puter's credit gate — a 0-credit account still gets a `402`.
 
 ## Prerequisites
 
@@ -109,7 +111,11 @@ Then add a `puter` provider to your opencode config (`~/.config/opencode/opencod
 }
 ```
 
-The bridge routes OpenAI `chat.completions` requests to Puter's chat interface. The model ids listed here must match what `GET /v1/models` returns (run `curl http://127.0.0.1:47831/v1/models` to see the live list). No API key is needed for the bridge — it uses your stored Puter token. Set `PUTER_TEST_MODE=true` (or send `X-Puter-Test-Mode: true`) to use Puter's free test API.
+The bridge routes OpenAI `chat.completions` requests to Puter's chat interface. The model ids listed here must match what `GET /v1/models` returns (run `curl http://127.0.0.1:47831/v1/models` to see the live list). No API key is needed for the bridge — it uses your stored Puter token. Set `PUTER_TEST_MODE=true` (or send `X-Puter-Test-Mode: true`) to use Puter's test API (skips moderation; it does **not** bypass Puter's credit gate).
+
+### Chat pricing / free usage
+
+Puter uses a [User-Pays model](https://docs.puter.com/user-pays-model/): each account has a **free monthly allowance**, and chat bills against it. If a paid model call hits `402 insufficient_funds`, puterMCP automatically retries on a genuinely free model (`glm-4.7-flash`), so chat keeps working after your allowance runs out. The free ($0) models — `glm-4.7-flash`, `glm-4.5-flash`, `glm-4.6v-flash`, `autoglm-phone-multilingual` — appear first in `list_chat_models` and `/v1/models`. Creating a fresh Puter account (or waiting for the monthly reset) restores the paid-model allowance. Check usage at https://puter.com/dashboard#usage or via `puter.auth.getMonthlyUsage()`.
 
 ## Usage
 
@@ -131,12 +137,12 @@ Once configured, restart your LLM environment. You can now ask it to generate im
 - **`list_models`**: List all available image generation models.
   - `category`: (Optional) Filter by category (`all`, `openai`, `google`, `flux`, `stable-diffusion`, `other`).
 
-- **`chat`**: Chat with Puter's free LLM models.
+- **`chat`**: Chat with Puter's LLM models (free fallback to `glm-4.7-flash` on `402 insufficient_funds`).
   - `messages`: Conversation history (`[{ role, content }]`).
-  - `model`: (Optional) Puter model id (e.g., `openai/gpt-4o-mini`).
+  - `model`: (Optional) Puter model id (e.g., `gpt-5-nano` or `glm-4.7-flash`).
   - `temperature`: (Optional) Sampling temperature (0–2).
   - `maxTokens`: (Optional) Max response tokens.
-  - `testMode`: (Optional) Use the free test API (default `false`).
+  - `testMode`: (Optional) Use Puter's test API (default `false`). Does **not** bypass Puter's credit gate.
 
 - **`list_chat_models`**: List available LLM models.
   - `provider`: (Optional) Filter by provider (e.g., `openai-completion`, `anthropic`, `google`).
